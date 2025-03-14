@@ -1,0 +1,80 @@
+#!/bin/bash
+
+
+# Created by: Micah Coyle - Jamf Technical Support Specialist 
+# Created on: 03/06/2025
+# Version 1.1
+
+# Script to change printer type from "Windows printer via spools" to "LPD/LPR Host or Printer"
+# This script requires root/administrative privileges to modify printer settings
+
+# IMPORTANT SECURITY NOTICE: 
+# - This script is provided as a starting point only and MUST be thoroughly tested before deployment
+# - The employee requesting/deploying this script assumes full responsibility for validation and consequences
+# - Never deploy untested scripts to production environments or customer devices
+# - All scripts should be reviewed for security implications and potential unintended consequences
+# - Consider edge cases and error handling for different OS versions and configurations
+
+# Specify the target printer name
+PRINTER_NAME="$1"
+
+# Function to check if script is running with root privileges
+check_root() {
+	if [ "$EUID" -ne 0 ]; then 
+		echo "Error: This script must be run with root privileges (sudo)"
+		exit 1
+	fi
+}
+
+# Function to check if printer exists
+check_printer() {
+	if ! lpstat -p "$PRINTER_NAME" >/dev/null 2>&1; then
+		echo "Error: Printer '$PRINTER_NAME' not found"
+		exit 1
+	fi
+}
+
+# Function to modify printer type
+modify_printer_type() {
+	# Backup current printer configuration
+	echo "Backing up current printer configuration for $PRINTER_NAME..."
+	lpoptions -p "$PRINTER_NAME" -l > "/tmp/${PRINTER_NAME}_backup.conf"
+	
+	# Get printer URI before deletion
+	local printer_info=$(lpstat -v "$PRINTER_NAME" 2>/dev/null)
+	local printer_uri=$(echo "$printer_info" | awk '{print $NF}')
+	
+	# Delete existing printer
+	echo "Removing existing printer configuration..."
+	lpadmin -x "$PRINTER_NAME"
+	
+	# Create new printer with LPD protocol
+	echo "Recreating printer with LPD protocol..."
+	local new_uri=$(echo "$printer_uri" | sed 's|smb://|lpd://|')
+	
+	# Using generic PostScript driver instead of raw
+	lpadmin -p "$PRINTER_NAME" -E -v "$new_uri" -P "/System/Library/Frameworks/Cups.framework/Versions/A/Resources/GenericPostScript.ppd"
+	
+	# Enable the printer
+	cupsenable "$PRINTER_NAME"
+	cupsaccept "$PRINTER_NAME"
+	
+	echo "Printer $PRINTER_NAME has been reconfigured to use LPD/LPR"
+}
+
+# Main execution
+main() {
+	# Check if printer name was provided
+	if [ -z "$PRINTER_NAME" ]; then
+		echo "Error: Please provide a printer name"
+		echo "Usage: sudo $0 PRINTER_NAME"
+		exit 1
+	fi
+	
+	check_root
+	check_printer
+	modify_printer_type
+}
+
+# Run the script
+main
