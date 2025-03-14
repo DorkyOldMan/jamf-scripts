@@ -4,7 +4,7 @@
 # Get system uptime in seconds
 uptime_seconds=$(sysctl -n kern.boottime | awk -F'[ ,]' '{print $4}')
 
-# Get current time in seconds since epoch
+# Get current time in seconds since the last restart
 current_time=$(date +%s)
 
 # Calculate the time difference (current time - uptime start time)
