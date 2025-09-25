@@ -1,0 +1,188 @@
+#!/bin/bash
+
+# Created by Micah Coyle in Jamf Support 
+# Modified on 09/25/25
+# Bootstrap Token Escrow Script for Jamf Pro
+# This script attempts to escrow a bootstrap token to Jamf Pro
+# Compatible with macOS 10.15+ where bootstrap tokens are supported
+
+# Set up logging
+LOG_FILE="/var/log/bootstrap_token_escrow.log"
+SCRIPT_NAME="Bootstrap Token Escrow"
+
+# Function to log messages with timestamp
+log_message() {
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - $SCRIPT_NAME: $1" | tee -a "$LOG_FILE"
+}
+
+# Function to check macOS version compatibility
+check_macos_version() {
+    local os_version
+    os_version=$(sw_vers -productVersion)
+    local major_version
+    major_version=$(echo "$os_version" | cut -d. -f1)
+    local minor_version
+    minor_version=$(echo "$os_version" | cut -d. -f2)
+    
+    # Bootstrap tokens require macOS 10.15+
+    if [[ "$major_version" -eq 10 && "$minor_version" -lt 15 ]] || [[ "$major_version" -lt 10 ]]; then
+        log_message "ERROR: Bootstrap tokens require macOS 10.15 or later. Current version: $os_version"
+        return 1
+    fi
+    
+    log_message "macOS version $os_version is compatible with bootstrap tokens"
+    return 0
+}
+
+# Function to check if device is enrolled in MDM
+check_mdm_enrollment() {
+    local mdm_status
+    mdm_status=$(profiles status -type enrollment 2>/dev/null | grep "Enrolled via DEP" | awk '{print $4}')
+    
+    if profiles status -type enrollment 2>/dev/null | grep -q "Yes"; then
+        log_message "Device is enrolled in MDM"
+        return 0
+    else
+        log_message "ERROR: Device is not enrolled in MDM. Bootstrap token escrow requires MDM enrollment."
+        return 1
+    fi
+}
+
+# Function to check current user's secure token status
+check_secure_token() {
+    local current_user
+    current_user=$(stat -f%Su /dev/console)
+    
+    if [[ "$current_user" == "root" ]] || [[ "$current_user" == "_mbsetupuser" ]]; then
+        log_message "WARNING: No user currently logged in or setup user detected"
+        return 1
+    fi
+    
+    local secure_token_status
+    secure_token_status=$(sysadminctl -secureTokenStatus "$current_user" 2>/dev/null | grep "ENABLED")
+    
+    if [[ -n "$secure_token_status" ]]; then
+        log_message "User '$current_user' has secure token enabled"
+        return 0
+    else
+        log_message "ERROR: User '$current_user' does not have secure token enabled"
+        return 1
+    fi
+}
+
+# Function to check if user is an administrator
+check_admin_status() {
+    local current_user
+    current_user=$(stat -f%Su /dev/console)
+    
+    if dseditgroup -o checkmember -m "$current_user" admin 2>/dev/null | grep -q "yes"; then
+        log_message "User '$current_user' has administrator privileges"
+        return 0
+    else
+        log_message "ERROR: User '$current_user' does not have administrator privileges"
+        return 1
+    fi
+}
+
+# Function to check if bootstrap token already exists
+check_existing_token() {
+    # Check if bootstrap token is already escrowed
+    if profiles status -type bootstraptoken 2>/dev/null | grep -q "escrowed"; then
+        log_message "Bootstrap token is already escrowed"
+        return 0
+    else
+        log_message "No bootstrap token currently escrowed"
+        return 1
+    fi
+}
+
+# Function to attempt bootstrap token escrow
+escrow_bootstrap_token() {
+    log_message "Attempting to escrow bootstrap token..."
+    
+    # Method 1: Use profiles command to install bootstrap token
+    if profiles install -type bootstraptoken 2>&1 | tee -a "$LOG_FILE"; then
+        log_message "Bootstrap token escrow command executed successfully"
+        
+        # Wait a moment and verify
+        sleep 5
+        
+        if profiles status -type bootstraptoken 2>/dev/null | grep -q "escrowed"; then
+            log_message "SUCCESS: Bootstrap token has been successfully escrowed"
+            return 0
+        else
+            log_message "WARNING: Bootstrap token command executed but escrow status unclear"
+            return 1
+        fi
+    else
+        log_message "ERROR: Failed to execute bootstrap token escrow command"
+        return 1
+    fi
+}
+
+# Function to trigger MDM profile renewal (alternative method)
+trigger_mdm_renewal() {
+    log_message "Attempting MDM profile renewal to trigger automatic bootstrap token escrow..."
+    
+    local current_user
+    current_user=$(stat -f%Su /dev/console)
+    local user_id
+    user_id=$(id -u "$current_user")
+    
+    # Trigger enrollment profile renewal which may cause automatic bootstrap token escrow
+    if launchctl asuser "$user_id" profiles renew -type enrollment 2>&1 | tee -a "$LOG_FILE"; then
+        log_message "MDM profile renewal triggered successfully"
+        return 0
+    else
+        log_message "ERROR: Failed to trigger MDM profile renewal"
+        return 1
+    fi
+}
+
+# Main execution
+main() {
+    log_message "Starting bootstrap token escrow process"
+    
+    # Check macOS version compatibility
+    if ! check_macos_version; then
+        exit 1
+    fi
+    
+    # Check MDM enrollment status
+    if ! check_mdm_enrollment; then
+        exit 1
+    fi
+    
+    # Check if bootstrap token already exists
+    if check_existing_token; then
+        log_message "Bootstrap token already escrowed. No action needed."
+        exit 0
+    fi
+    
+    # Check if a user is logged in and has proper credentials
+    if ! check_secure_token || ! check_admin_status; then
+        log_message "ERROR: Current user does not meet requirements for bootstrap token escrow"
+        log_message "Requirements: User must be logged in, have secure token, and administrator privileges"
+        exit 1
+    fi
+    
+    # Attempt to escrow bootstrap token
+    if escrow_bootstrap_token; then
+        log_message "Bootstrap token escrow completed successfully"
+        exit 0
+    else
+        log_message "Primary escrow method failed. Attempting alternative method..."
+        
+        # Try alternative method - MDM profile renewal
+        if trigger_mdm_renewal; then
+            log_message "Alternative method completed. Check bootstrap token status in a few minutes."
+            exit 0
+        else
+            log_message "ERROR: All bootstrap token escrow methods failed"
+            exit 1
+        fi
+    fi
+}
+
+# Execute main function
+main "$@"
